@@ -50,15 +50,18 @@ jobs:
           $ff = Get-ChildItem -Recurse -Path .\ffmpeg-win -Filter ffmpeg.exe | Select-Object -First 1
           Copy-Item $ff.FullName tools\ffmpeg\windows\ffmpeg.exe
 
-      # MACOS: evermeet latest universal zip
+      # MACOS: Evermeet download API (needs -J -L)
       - name: Download FFmpeg (macOS)
         if: runner.os == 'macOS'
+        shell: bash
         run: |
           set -eux
           mkdir -p tools/ffmpeg/macos
-          curl -L -o ffmpeg-macos.zip "https://evermeet.cx/ffmpeg/ffmpeg.zip"
+          # Use Evermeet "download API" as recommended, with -J -L:
+          # https://evermeet.cx/ffmpeg/get[release][/(ffmpeg|ffprobe|ffplay)][/(7z|zip)]
+          curl -JL "https://evermeet.cx/ffmpeg/get/zip" -o ffmpeg-macos.zip
           unzip -o ffmpeg-macos.zip -d tools/ffmpeg/macos
-          mv tools/ffmpeg/macos/ffmpeg tools/ffmpeg/macos/ffmpeg || true
+          # Ensure executable bit
           chmod +x tools/ffmpeg/macos/ffmpeg
 
       # ---------- Build Receiver ----------
