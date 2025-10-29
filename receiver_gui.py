@@ -108,10 +108,10 @@ class App(tk.Tk):
 
     def choose_output(self):
         path = filedialog.asksaveasfilename(
-            title="Save output MP4",
-            defaultextension=".mp4",
-            initialfile="output.mp4",
-            filetypes=[("MP4 video", "*.mp4"), ("All files", "*.*")],
+            title="Save output MKV",
+            defaultextension=".mkv",
+            initialfile="output.mkv",
+            filetypes=[("MKV video", "*.mkv"), ("All files", "*.*")],
         )
         if path:
             self.out_path.set(path)
@@ -140,7 +140,7 @@ class App(tk.Tk):
             messagebox.showerror("Missing SDP", "Please load a valid .SDP file.")
             return
         if not out:
-            messagebox.showerror("Missing output", "Please choose an output .mp4 path.")
+            messagebox.showerror("Missing output", "Please choose an output .mkv path.")
             return
 
         cmd = [
@@ -148,7 +148,6 @@ class App(tk.Tk):
             "-protocol_whitelist", "file,rtp,udp",
             "-i", sdp,
             "-c", "copy",
-            "-movflags", "+faststart",
             out,
         ]
 
