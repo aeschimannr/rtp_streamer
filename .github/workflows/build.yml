@@ -1,4 +1,4 @@
-name: build-desktop-apps
+name: build-apps
 on:
   push:
   workflow_dispatch:
@@ -12,25 +12,10 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Checkout (with LFS)
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          lfs: true
-          
-      - name: Cache FFmpeg
-        id: cache-ffmpeg
-        uses: actions/cache@v3
-        with:
-          path: ffmpeg
-          key: ${{ runner.os }}-ffmpeg-${{ hashFiles('scripts/ffmpeg-version.txt') }}
 
-      - name: Download FFmpeg if cache miss
-        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p ffmpeg
-          curl -L https://example.com/ffmpeg.tar.xz | tar -xJ -C ffmpeg --strip-components=1
-
-      - name: Set up Python
+      - name: Setup Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -38,44 +23,91 @@ jobs:
       - name: Install PyInstaller
         run: python -m pip install --upgrade pip pyinstaller
 
-      # Make ffmpeg executable on Unix platforms
-      - name: Mark FFmpeg executable (Unix)
-        if: runner.os != 'Windows'
+      # ---------- Download FFmpeg per OS ----------
+      # LINUX: johnvansickle static
+      - name: Download FFmpeg (Linux)
+        if: runner.os == 'Linux'
         run: |
-          chmod +x tools/ffmpeg/linux/ffmpeg || true
-          chmod +x tools/ffmpeg/macos/ffmpeg || true
+          set -eux
+          mkdir -p tools/ffmpeg/linux
+          curl -L -o ffmpeg-linux.tar.xz "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+          tar -xJf ffmpeg-linux.tar.xz
+          # Find extracted ffmpeg (folder name contains version)
+          F=$(find . -maxdepth 1 -type d -name "ffmpeg-*amd64-static" | head -n1)
+          cp "$F/ffmpeg" tools/ffmpeg/linux/ffmpeg
+          chmod +x tools/ffmpeg/linux/ffmpeg
 
-      # Compute add-binary argument and pick the right FFmpeg path per OS
-      - name: Compute build vars
-        id: cfg
-        shell: bash
+      # WINDOWS: gyan.dev full static
+      - name: Download FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
         run: |
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            echo "SEP=;" >> $GITHUB_OUTPUT
-            echo "FF=tools/ffmpeg/windows/ffmpeg.exe" >> $GITHUB_OUTPUT
-          elif [[ "${{ runner.os }}" == "macOS" ]]; then
-            echo "SEP=:" >> $GITHUB_OUTPUT
-            echo "FF=tools/ffmpeg/macos/ffmpeg" >> $GITHUB_OUTPUT
-          else
-            echo "SEP=:" >> $GITHUB_OUTPUT
-            echo "FF=tools/ffmpeg/linux/ffmpeg" >> $GITHUB_OUTPUT
-          fi
+          New-Item -ItemType Directory -Force -Path tools\ffmpeg\windows | Out-Null
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-git-full.7z" -OutFile "ffmpeg-win.7z"
+          # 7-Zip is available on windows-latest runners
+          7z x ffmpeg-win.7z -offmpeg-win | Out-Null
+          # Find ffmpeg.exe in the extracted tree
+          $ff = Get-ChildItem -Recurse -Path .\ffmpeg-win -Filter ffmpeg.exe | Select-Object -First 1
+          Copy-Item $ff.FullName tools\ffmpeg\windows\ffmpeg.exe
 
-      - name: Build receiver (PyInstaller)
+      # MACOS: evermeet latest universal zip
+      - name: Download FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -eux
+          mkdir -p tools/ffmpeg/macos
+          curl -L -o ffmpeg-macos.zip "https://evermeet.cx/ffmpeg/ffmpeg.zip"
+          unzip -o ffmpeg-macos.zip -d tools/ffmpeg/macos
+          mv tools/ffmpeg/macos/ffmpeg tools/ffmpeg/macos/ffmpeg || true
+          chmod +x tools/ffmpeg/macos/ffmpeg
+
+      # ---------- Build Receiver ----------
+      - name: Build receiver (Linux)
+        if: runner.os == 'Linux'
         run: |
           pyinstaller --onefile --windowed \
-            --add-binary "${{ steps.cfg.outputs.FF }}${{ steps.cfg.outputs.SEP }}ffmpeg" \
+            --add-binary "tools/ffmpeg/linux/ffmpeg:ffmpeg" \
             receiver_gui.py
 
-      - name: Build sender (PyInstaller)
+      - name: Build receiver (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          pyinstaller --onefile --windowed `
+            --add-binary "tools\ffmpeg\windows\ffmpeg.exe;ffmpeg" `
+            receiver_gui.py
+
+      - name: Build receiver (macOS)
+        if: runner.os == 'macOS'
         run: |
           pyinstaller --onefile --windowed \
-            --add-binary "${{ steps.cfg.outputs.FF }}${{ steps.cfg.outputs.SEP }}ffmpeg" \
+            --add-binary "tools/ffmpeg/macos/ffmpeg:ffmpeg" \
+            receiver_gui.py
+
+      # ---------- Build Sender ----------
+      - name: Build sender (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          pyinstaller --onefile --windowed \
+            --add-binary "tools/ffmpeg/linux/ffmpeg:ffmpeg" \
             sender_gui.py
 
-      - name: List dist
-        run: ls -la dist
+      - name: Build sender (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          pyinstaller --onefile --windowed `
+            --add-binary "tools\ffmpeg\windows\ffmpeg.exe;ffmpeg" `
+            sender_gui.py
 
+      - name: Build sender (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          pyinstaller --onefile --windowed \
+            --add-binary "tools/ffmpeg/macos/ffmpeg:ffmpeg" \
+            sender_gui.py
+
+      # ---------- Upload artifacts ----------
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -83,3 +115,4 @@ jobs:
           path: |
             dist/receiver_gui*
             dist/sender_gui*
+
