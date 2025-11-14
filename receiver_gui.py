@@ -64,25 +64,30 @@ def find_ffmpeg() -> str | None:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("RTP Receiver — FFmpeg (minimal)")
-        self.geometry("520x220")
+        self.title("Video Stream Recorder")
+        self.geometry("600x220")
 
         self.sdp_path = tk.StringVar(value="")
+        self.rtsp_url = tk.StringVar(value="")
         self.out_path = tk.StringVar(value="")
         self.proc: subprocess.Popen | None = None
         self.ffmpeg_path = find_ffmpeg()
 
         # --- UI ---
         row = 0
-        tk.Button(self, text="1) Load SDP…", command=self.load_sdp).grid(row=row, column=0, padx=10, pady=10, sticky="w")
+        tk.Button(self, text="Load SDP…", command=self.load_sdp).grid(row=row, column=0, padx=10, pady=10, sticky="w")
         tk.Label(self, textvariable=self.sdp_path, anchor="w", fg="#333").grid(row=row, column=1, padx=10, pady=10, sticky="we")
 
         row += 1
-        tk.Button(self, text="2) Choose output…", command=self.choose_output).grid(row=row, column=0, padx=10, pady=10, sticky="w")
+        tk.Label(self, text="or RTSP endpoint:").grid(row=row, column=0, padx=10, pady=10, sticky="w")
+        tk.Entry(self, textvariable=self.rtsp_url, width=40).grid(row=row, column=1, padx=10, pady=10, sticky="we")
+
+        row += 1
+        tk.Button(self, text="Choose output…", command=self.choose_output).grid(row=row, column=0, padx=10, pady=10, sticky="w")
         tk.Label(self, textvariable=self.out_path, anchor="w", fg="#333").grid(row=row, column=1, padx=10, pady=10, sticky="we")
 
         row += 1
-        self.start_btn = tk.Button(self, text="3) Start", command=self.toggle_start_stop)
+        self.start_btn = tk.Button(self, text="Start", command=self.toggle_start_stop)
         self.start_btn.grid(row=row, column=0, padx=10, pady=10, sticky="w")
         self.status_lbl = tk.Label(self, text="Idle", anchor="w")
         self.status_lbl.grid(row=row, column=1, padx=10, pady=10, sticky="we")
@@ -135,21 +140,36 @@ class App(tk.Tk):
             return
 
         sdp = self.sdp_path.get().strip()
+        rtsp = self.rtsp_url.get().strip()
         out = self.out_path.get().strip()
-        if not sdp or not os.path.isfile(sdp):
-            messagebox.showerror("Missing SDP", "Please load a valid .SDP file.")
+        if not sdp and not rtsp:
+            messagebox.showerror("Missing source", "Load an SDP file or enter an RTSP URL.")
+            return
+        if sdp and not os.path.isfile(sdp):
+            messagebox.showerror("Missing SDP", "The selected SDP file no longer exists. Load it again or use RTSP.")
             return
         if not out:
             messagebox.showerror("Missing output", "Please choose an output .mkv path.")
             return
 
-        cmd = [
-            self.ffmpeg_path,
-            "-protocol_whitelist", "file,rtp,udp",
-            "-i", sdp,
-            "-c", "copy",
-            out,
-        ]
+        if sdp:
+            cmd = [
+                self.ffmpeg_path,
+                "-protocol_whitelist", "file,rtp,udp",
+                "-i", sdp,
+                "-c", "copy",
+                out,
+            ]
+            status_text = "Recording from SDP…"
+        else:
+            cmd = [
+                self.ffmpeg_path,
+                "-rtsp_transport", "tcp",
+                "-i", rtsp,
+                "-c", "copy",
+                out,
+            ]
+            status_text = "Recording from RTSP…"
 
         try:
             self.proc = subprocess.Popen(cmd)
@@ -158,7 +178,7 @@ class App(tk.Tk):
             self.proc = None
             return
 
-        self.status_lbl.config(text="Recording…")
+        self.status_lbl.config(text=status_text)
         self.start_btn.config(text="Stop")
 
         threading.Thread(target=self._wait_and_reset, daemon=True).start()
