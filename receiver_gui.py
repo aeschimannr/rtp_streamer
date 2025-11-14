@@ -69,7 +69,8 @@ class App(tk.Tk):
 
         self.sdp_path = tk.StringVar(value="")
         self.rtsp_url = tk.StringVar(value="")
-        self.out_path = tk.StringVar(value="")
+        self.base_name = tk.StringVar(value="recording")
+        self.output_dir = tk.StringVar(value="")
         self.proc: subprocess.Popen | None = None
         self.ffmpeg_path = find_ffmpeg()
 
@@ -83,8 +84,12 @@ class App(tk.Tk):
         tk.Entry(self, textvariable=self.rtsp_url, width=40).grid(row=row, column=1, padx=10, pady=10, sticky="we")
 
         row += 1
-        tk.Button(self, text="Choose output…", command=self.choose_output).grid(row=row, column=0, padx=10, pady=10, sticky="w")
-        tk.Label(self, textvariable=self.out_path, anchor="w", fg="#333").grid(row=row, column=1, padx=10, pady=10, sticky="we")
+        tk.Button(self, text="Choose output folder…", command=self.choose_output).grid(row=row, column=0, padx=10, pady=10, sticky="w")
+        tk.Label(self, textvariable=self.output_dir, anchor="w", fg="#333").grid(row=row, column=1, padx=10, pady=10, sticky="we")
+
+        row += 1
+        tk.Label(self, text="Clip base name:").grid(row=row, column=0, padx=10, pady=10, sticky="w")
+        tk.Entry(self, textvariable=self.base_name, width=20).grid(row=row, column=1, padx=10, pady=10, sticky="w")
 
         row += 1
         self.start_btn = tk.Button(self, text="Start", command=self.toggle_start_stop)
@@ -112,14 +117,9 @@ class App(tk.Tk):
             self.sdp_path.set(path)
 
     def choose_output(self):
-        path = filedialog.asksaveasfilename(
-            title="Save output MKV",
-            defaultextension=".mkv",
-            initialfile="output.mkv",
-            filetypes=[("MKV video", "*.mkv"), ("All files", "*.*")],
-        )
+        path = filedialog.askdirectory(title="Select output folder")
         if path:
-            self.out_path.set(path)
+            self.output_dir.set(path)
 
     def toggle_start_stop(self):
         if self.proc is None:
@@ -141,16 +141,28 @@ class App(tk.Tk):
 
         sdp = self.sdp_path.get().strip()
         rtsp = self.rtsp_url.get().strip()
-        out = self.out_path.get().strip()
+        out_dir = self.output_dir.get().strip()
+        base_name = self.base_name.get().strip()
         if not sdp and not rtsp:
             messagebox.showerror("Missing source", "Load an SDP file or enter an RTSP URL.")
             return
         if sdp and not os.path.isfile(sdp):
             messagebox.showerror("Missing SDP", "The selected SDP file no longer exists. Load it again or use RTSP.")
             return
-        if not out:
-            messagebox.showerror("Missing output", "Please choose an output .mkv path.")
+        if not out_dir:
+            messagebox.showerror("Missing output", "Please choose an output folder.")
             return
+        if not base_name:
+            messagebox.showerror("Missing name", "Provide a base name for the clips.")
+            return
+
+        safe_base = "".join(c if (c.isalnum() or c in ("-", "_")) else "_" for c in base_name).strip("_")
+        if not safe_base:
+            messagebox.showerror("Invalid name", "Use letters, numbers, dashes or underscores for the base name.")
+            return
+
+        os.makedirs(out_dir, exist_ok=True)
+        output_template = os.path.join(out_dir, f"{safe_base}_%Y%m%d-%H%M%S.mkv")
 
         if sdp:
             cmd = [
@@ -158,7 +170,11 @@ class App(tk.Tk):
                 "-protocol_whitelist", "file,rtp,udp",
                 "-i", sdp,
                 "-c", "copy",
-                out,
+                "-f", "segment",
+                "-segment_time", "1800",
+                "-reset_timestamps", "1",
+                "-strftime", "1",
+                output_template,
             ]
             status_text = "Recording from SDP…"
         else:
@@ -167,7 +183,11 @@ class App(tk.Tk):
                 "-rtsp_transport", "tcp",
                 "-i", rtsp,
                 "-c", "copy",
-                out,
+                "-f", "segment",
+                "-segment_time", "1800",
+                "-reset_timestamps", "1",
+                "-strftime", "1",
+                output_template,
             ]
             status_text = "Recording from RTSP…"
 
