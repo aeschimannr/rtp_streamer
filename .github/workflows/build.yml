@@ -114,18 +114,18 @@ jobs:
       - name: Build mqtt_logger (Linux)
         if: runner.os == 'Linux'
         run: |
-          pyinstaller --onefile mqtt_logger.py
+          pyinstaller --onefile --windowed mqtt_logger.py
 
       - name: Build mqtt_logger (Windows)
         if: runner.os == 'Windows'
         shell: powershell
         run: |
-          pyinstaller --onefile mqtt_logger.py
+          pyinstaller --onefile --windowed mqtt_logger.py
 
       - name: Build mqtt_logger (macOS)
         if: runner.os == 'macOS'
         run: |
-          pyinstaller --onefile mqtt_logger.py
+          pyinstaller --onefile --windowed mqtt_logger.py
 
       # ---------- Upload artifacts ----------
       - name: Upload artifacts
