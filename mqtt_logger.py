@@ -37,6 +37,8 @@ class MqttLoggerApp(tk.Tk):
         self._message_count = 0
         self._queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self._form_widgets: list[tk.Widget] = []
+        self._last_pic_log: datetime | None = None
+        self._rorqual_since_last_pic = False
 
         self._build_ui()
         self.after(150, self._poll_queue)
@@ -125,6 +127,8 @@ class MqttLoggerApp(tk.Tk):
         self._client = client
         self._log_file = log_file
         self._message_count = 0
+        self._last_pic_log = None
+        self._rorqual_since_last_pic = False
         self.status_var.set("Connecting…")
         self._queue_event("log", f"→ Logging to {out_path}")
         self._set_form_state("disabled")
@@ -205,14 +209,38 @@ class MqttLoggerApp(tk.Tk):
             return
 
         payload_str = msg.payload.decode("utf-8", errors="replace")
+        topic = msg.topic
         try:
             payload = json.loads(payload_str)
         except json.JSONDecodeError:
             payload = {"_raw": payload_str}
 
+        if topic == "/proreus/detections":
+            if isinstance(payload, dict) and payload.get("type") == "rorqual":
+                self._rorqual_since_last_pic = True
+
+        if topic.startswith("/proreus/pic"):
+            now = datetime.now(timezone.utc)
+            allow_pic = False
+            if self._last_pic_log is None:
+                allow_pic = True
+            else:
+                elapsed = (now - self._last_pic_log).total_seconds()
+                if elapsed >= 300:
+                    allow_pic = True
+            if not allow_pic and self._rorqual_since_last_pic:
+                allow_pic = True
+
+            if not allow_pic:
+                self._queue_event("log", f"[SKIP] Rate-limited pic message on {topic}")
+                return
+
+            self._last_pic_log = now
+            self._rorqual_since_last_pic = False
+
         record = {
             "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-            "topic": msg.topic,
+            "topic": topic,
             "payload": payload,
         }
 
