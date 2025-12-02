@@ -25,9 +25,9 @@ class MqttLoggerApp(tk.Tk):
         self.title("MQTT JSON Logger")
         self.geometry("560x460")
 
-        self.host_var = tk.StringVar(value="127.0.0.1")
+        self.host_var = tk.StringVar(value="10.10.10.1")
         self.port_var = tk.StringVar(value="1883")
-        self.topic_var = tk.StringVar(value="sensors/#")
+        self.topic_var = tk.StringVar(value="#")
         default_path = Path.home() / "mqtt_log.jsonl"
         self.out_var = tk.StringVar(value=str(default_path))
         self.status_var = tk.StringVar(value="Idle")
