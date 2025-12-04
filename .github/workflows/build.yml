@@ -30,7 +30,8 @@ jobs:
         run: |
           set -eux
           mkdir -p tools/ffmpeg/linux
-          curl -L -o ffmpeg-linux.tar.xz "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+          curl --retry 5 --retry-all-errors --connect-timeout 20 --max-time 300 \
+            -L -o ffmpeg-linux.tar.xz "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
           tar -xJf ffmpeg-linux.tar.xz
           # Find extracted ffmpeg (folder name contains version)
           F=$(find . -maxdepth 1 -type d -name "ffmpeg-*amd64-static" | head -n1)
@@ -59,7 +60,8 @@ jobs:
           mkdir -p tools/ffmpeg/macos
           # Use Evermeet "download API" as recommended, with -J -L:
           # https://evermeet.cx/ffmpeg/get[release][/(ffmpeg|ffprobe|ffplay)][/(7z|zip)]
-          curl -JL "https://evermeet.cx/ffmpeg/get/zip" -o ffmpeg-macos.zip
+          curl --retry 5 --retry-all-errors --connect-timeout 20 --max-time 300 \
+            -JL "https://evermeet.cx/ffmpeg/get/zip" -o ffmpeg-macos.zip
           unzip -o ffmpeg-macos.zip -d tools/ffmpeg/macos
           # Ensure executable bit
           chmod +x tools/ffmpeg/macos/ffmpeg
