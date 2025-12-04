@@ -13,8 +13,8 @@ Packaging so the client installs NOTHING:
       --add-binary "/absolute/path/to/ffmpeg:ffmpeg" \
       receiver_gui.py
   Windows (PowerShell/CMD):
-    pyinstaller --onefile --windowed \
-      --add-binary "C:\path\to\ffmpeg.exe;ffmpeg" \
+    pyinstaller --onefile --windowed ^
+      --add-binary "C:\\path\\to\\ffmpeg.exe;ffmpeg" ^
       receiver_gui.py
 
 Notes:
@@ -29,6 +29,23 @@ import subprocess
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
+
+try:
+    import numpy as np
+except Exception:
+    np = None  # type: ignore
+
+try:
+    import cv2
+except Exception:
+    cv2 = None  # type: ignore
+
+try:
+    from PIL import Image, ImageTk
+
+    PIL_AVAILABLE = True
+except Exception:
+    PIL_AVAILABLE = False
 
 
 def find_ffmpeg() -> str | None:
@@ -61,18 +78,131 @@ def find_ffmpeg() -> str | None:
     return None
 
 
+def detect_bottom_line(
+    frame_gray,
+    ksize=21,
+    elongation_thresh=10,
+    var_thresh_rel=0.5,
+):
+    """Détecte la ligne du contour le plus bas dans une image (frame_gray)."""
+    img = frame_gray
+    h, w = img.shape
+    img = img.astype(np.float32)
+
+    # Variance locale
+    mean = cv2.blur(img, (ksize, ksize))
+    variance = cv2.blur(img**2, (ksize, ksize)) - mean**2
+
+    # Seuil relatif autour de la variance moyenne
+    var_mean = np.mean(variance)
+    mask = (np.abs(variance - var_mean) < var_thresh_rel * var_mean).astype(np.uint8) * 255
+
+    # Contours
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Garder les contours très allongés
+    elongated = []
+    for c in contours:
+        x, y, w_box, h_box = cv2.boundingRect(c)
+        if min(w_box, h_box) == 0:
+            continue
+        if max(w_box, h_box) / min(w_box, h_box) > elongation_thresh:
+            elongated.append(c)
+
+    if not elongated:
+        return None
+
+    # Prendre le contour le plus "bas" (plus grande coordonnée y moyenne)
+    bottom = max(elongated, key=lambda c: np.mean(c[:, 0, 1]))
+    x = bottom[:, 0, 0]
+    y = bottom[:, 0, 1]
+
+    if len(x) < 2:
+        return None
+
+    # Fit d'une droite y = a x + b
+    try:
+        a, b = np.polyfit(x, y, 1)
+    except np.linalg.LinAlgError:
+        return None
+
+    x1, x2 = 0, w - 1
+    y1, y2 = int(a * x1 + b), int(a * x2 + b)
+
+    # On renvoie les deux points de la droite
+    return (x1, y1, x2, y2, a, b)
+
+
+def draw_angle_line(frame_bgr, angle_deg, hfov_deg=40.0, color=(0, 0, 255), thickness=2):
+    """
+    Draw a colored line at a given angle relative to image center (BGR frame).
+
+    Parameters
+    ----------
+    frame_bgr : np.ndarray (H, W, 3)
+        Color image (BGR, from OpenCV).
+    angle_deg : float
+        Angle in degrees relative to camera center (>0 right, <0 left).
+    hfov_deg : float
+        Horizontal field of view of the camera (total, in degrees).
+    color : (B, G, R)
+        Line color (default red).
+    thickness : int
+        Line thickness in pixels.
+    """
+    if cv2 is None or np is None:
+        return frame_bgr
+
+    H, W = frame_bgr.shape[:2]
+    frame_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+
+    half_fov = hfov_deg / 2.0
+    outside_fov = abs(angle_deg) > half_fov
+    angle_clamped = max(-half_fov, min(half_fov, angle_deg))
+
+    px_per_deg = W / hfov_deg
+    x_center = W / 2.0
+    x = int(round(x_center + angle_clamped * px_per_deg))
+    x = max(0, min(W - 1, x))
+
+    y_top_line = 0
+    line = detect_bottom_line(frame_gray)
+    if line is not None:
+        if len(line) == 4:
+            y1, y2, a, b = line
+        else:
+            _, y1, _, y2, a, b = line
+        y_h = int(round(a * x + b))
+        y_h = max(0, min(H - 1, y_h))
+        y_top_line = y_h
+
+    draw_thickness = thickness * 8 if outside_fov else thickness
+
+    vis = frame_bgr.copy()
+    cv2.line(vis, (x, H - 1), (x, y_top_line), color, draw_thickness)
+
+    return vis
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Video Stream Recorder")
-        self.geometry("600x220")
+        self.geometry("640x480")
 
         self.sdp_path = tk.StringVar(value="")
         self.rtsp_url = tk.StringVar(value="")
         self.base_name = tk.StringVar(value="recording")
         self.output_dir = tk.StringVar(value="")
+        self.show_stream = tk.BooleanVar(value=False)
         self.proc: subprocess.Popen | None = None
         self.ffmpeg_path = find_ffmpeg()
+        self.preview_stop = threading.Event()
+        self.preview_photo = None
+        self.preview_size = (640, 480)
+        self.preview_fps = 12
+        self.overlay_angle_deg = 10.0
+        self.overlay_hfov_deg = 34.0
 
         # --- UI ---
         row = 0
@@ -92,10 +222,21 @@ class App(tk.Tk):
         tk.Entry(self, textvariable=self.base_name, width=20).grid(row=row, column=1, padx=10, pady=10, sticky="w")
 
         row += 1
+        tk.Checkbutton(
+            self,
+            text="Show stream preview",
+            variable=self.show_stream,
+            command=self._toggle_preview_box,
+        ).grid(row=row, column=0, padx=10, pady=(0, 10), sticky="w")
+
+        row += 1
         self.start_btn = tk.Button(self, text="Start", command=self.toggle_start_stop)
         self.start_btn.grid(row=row, column=0, padx=10, pady=10, sticky="w")
         self.status_lbl = tk.Label(self, text="Idle", anchor="w")
         self.status_lbl.grid(row=row, column=1, padx=10, pady=10, sticky="we")
+
+        # Row index for preview box so we can grid/ungrid cleanly
+        self.preview_row_index = row + 1
 
         # Make right column stretch
         self.grid_columnconfigure(1, weight=1)
@@ -107,11 +248,28 @@ class App(tk.Tk):
         if self.ffmpeg_path is None:
             self.status_lbl.config(text="ffmpeg not found — select SDP/output then Start to retry")
 
+        # Preview box (hidden until checkbox is checked)
+        self.preview_frame = tk.Frame(self, borderwidth=1, relief="groove")
+        self.preview_label = tk.Label(self.preview_frame, text="Live stream preview (uses current RTP/RTSP settings)")
+        self.preview_label.pack(anchor="w", padx=8, pady=(6, 2))
+        self.preview_canvas = tk.Label(
+            self.preview_frame,
+            text="Preview will appear here",
+            bg="#111",
+            fg="#eee",
+        )
+        self.preview_canvas.pack(fill="both", expand=True, padx=8, pady=(0, 6))
+        self.preview_status = tk.Label(self.preview_frame, text="", fg="#555", anchor="w")
+        self.preview_status.pack(anchor="w", padx=8, pady=(0, 6))
+
     # --- Actions ---
     def load_sdp(self):
         path = filedialog.askopenfilename(
             title="Select SDP file",
-            filetypes=[("SDP files", "*.sdp;*.SDP"), ("All files", "*.*")],
+            filetypes=[
+                ("SDP files", ("*.sdp", "*.SDP")),
+                ("All files", "*"),
+            ],
         )
         if path:
             self.sdp_path.set(path)
@@ -121,11 +279,32 @@ class App(tk.Tk):
         if path:
             self.output_dir.set(path)
 
+    def _toggle_preview_box(self):
+        if self.show_stream.get():
+            self.preview_frame.grid(
+                row=self.preview_row_index,
+                column=0,
+                columnspan=2,
+                sticky="nsew",
+                padx=10,
+                pady=(0, 10),
+            )
+            if not PIL_AVAILABLE:
+                self.preview_status.config(text="Install Pillow to enable preview rendering.")
+        else:
+            self.preview_frame.grid_remove()
+            self._stop_preview()
+
     def toggle_start_stop(self):
         if self.proc is None:
             self.start_ffmpeg()
         else:
             self.stop_ffmpeg()
+
+    def _build_input_args(self, sdp: str, rtsp: str) -> list[str]:
+        if sdp:
+            return ["-protocol_whitelist", "file,rtp,udp", "-i", sdp]
+        return ["-rtsp_transport", "tcp", "-i", rtsp]
 
     def start_ffmpeg(self):
         # Late resolve ffmpeg (in case PATH changed or bundle extracted)
@@ -164,35 +343,68 @@ class App(tk.Tk):
         os.makedirs(out_dir, exist_ok=True)
         output_template = os.path.join(out_dir, f"{safe_base}_%Y%m%d-%H%M%S.mkv")
 
-        if sdp:
-            cmd = [
-                self.ffmpeg_path,
-                "-protocol_whitelist", "file,rtp,udp",
-                "-i", sdp,
-                "-c", "copy",
-                "-f", "segment",
-                "-segment_time", "3600",
-                "-reset_timestamps", "1",
-                "-strftime", "1",
+        input_args = self._build_input_args(sdp, rtsp)
+        preview_requested = self.show_stream.get()
+        preview_enabled = preview_requested and PIL_AVAILABLE
+
+        cmd = [
+            self.ffmpeg_path,
+            *input_args,
+        ]
+
+        width, height = self.preview_size
+        if preview_enabled:
+            # One ffmpeg handles both recording and preview via filter_complex split.
+            cmd += [
+                "-filter_complex",
+                f"[0:v]fps={self.preview_fps},scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black[vout]",
+                "-map",
+                "0",
+                "-c",
+                "copy",
+                "-f",
+                "segment",
+                "-segment_time",
+                "3600",
+                "-reset_timestamps",
+                "1",
+                "-strftime",
+                "1",
                 output_template,
+                "-map",
+                "[vout]",
+                "-an",
+                "-c:v",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-f",
+                "rawvideo",
+                "pipe:1",
             ]
-            status_text = "Recording from SDP…"
         else:
-            cmd = [
-                self.ffmpeg_path,
-                "-rtsp_transport", "tcp",
-                "-i", rtsp,
-                "-c", "copy",
-                "-f", "segment",
-                "-segment_time", "3600",
-                "-reset_timestamps", "1",
-                "-strftime", "1",
+            cmd += [
+                "-c",
+                "copy",
+                "-f",
+                "segment",
+                "-segment_time",
+                "3600",
+                "-reset_timestamps",
+                "1",
+                "-strftime",
+                "1",
                 output_template,
             ]
-            status_text = "Recording from RTSP…"
+        status_text = "Recording from SDP…" if sdp else "Recording from RTSP…"
 
         try:
-            self.proc = subprocess.Popen(cmd)
+            self.proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE if preview_enabled else None,
+                stderr=subprocess.DEVNULL,
+                bufsize=width * height * 3 if preview_enabled else -1,
+            )
         except Exception as e:
             messagebox.showerror("Error", f"Failed to start ffmpeg: {e}")
             self.proc = None
@@ -201,7 +413,68 @@ class App(tk.Tk):
         self.status_lbl.config(text=status_text)
         self.start_btn.config(text="Stop")
 
+        if preview_enabled:
+            overlay_ready = np is not None and cv2 is not None
+            overlay_note = "" if overlay_ready else " (overlay disabled: install numpy + opencv-python)"
+            self.preview_status.config(text=f"Preview running at ~{self.preview_fps} fps{overlay_note}…")
+            self.preview_stop.clear()
+            threading.Thread(
+                target=self._run_preview,
+                args=(self.proc, width, height),
+                daemon=True,
+            ).start()
+        else:
+            if preview_requested and not PIL_AVAILABLE:
+                self.preview_status.config(text="Preview unavailable (Pillow not installed).")
+            else:
+                self.preview_status.config(text="")
+            self._stop_preview()
+
         threading.Thread(target=self._wait_and_reset, daemon=True).start()
+
+    def _run_preview(self, proc: subprocess.Popen, width: int, height: int):
+        if proc.stdout is None:
+            return
+        frame_size = width * height * 3
+        overlay_ready = np is not None and cv2 is not None
+        while not self.preview_stop.is_set():
+            data = proc.stdout.read(frame_size)
+            if not data or len(data) < frame_size:
+                break
+            try:
+                if overlay_ready:
+                    arr = np.frombuffer(data, dtype=np.uint8)
+                    if arr.size != frame_size:
+                        break
+                    arr = arr.reshape((height, width, 3))
+                    bgr = arr[:, :, ::-1]
+                    bgr = draw_angle_line(
+                        bgr,
+                        self.overlay_angle_deg,
+                        hfov_deg=self.overlay_hfov_deg,
+                        color=(0, 0, 255),
+                        thickness=2,
+                    )
+                    arr = bgr[:, :, ::-1]
+                    img = Image.fromarray(arr, mode="RGB")
+                else:
+                    img = Image.frombytes("RGB", (width, height), data)
+                photo = ImageTk.PhotoImage(img)
+            except Exception:
+                break
+
+            def update_label(p=photo):
+                self.preview_photo = p
+                self.preview_canvas.config(image=p, text="")
+
+            self.preview_canvas.after(0, update_label)
+
+        self.preview_stop.set()
+        self.preview_canvas.after(0, lambda: self.preview_status.config(text="Preview stopped"))
+
+    def _stop_preview(self):
+        self.preview_stop.set()
+        # No-op otherwise; preview shares the main ffmpeg process when enabled.
 
     def _wait_and_reset(self):
         if self.proc is None:
@@ -213,6 +486,7 @@ class App(tk.Tk):
         self.proc = None
         self.start_btn.config(text="Start")
         self.status_lbl.config(text="Idle")
+        self._stop_preview()
 
     def stop_ffmpeg(self):
         if self.proc is None:
@@ -221,6 +495,7 @@ class App(tk.Tk):
             self.proc.terminate()
         except Exception:
             pass
+        self._stop_preview()
         self.status_lbl.config(text="Stopping…")
 
     def on_close(self):
@@ -229,6 +504,7 @@ class App(tk.Tk):
                 self.proc.terminate()
             except Exception:
                 pass
+        self._stop_preview()
         self.destroy()
 
 
