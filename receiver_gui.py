@@ -29,6 +29,7 @@ import subprocess
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
+import socket
 
 try:
     import numpy as np
@@ -195,6 +196,8 @@ class App(tk.Tk):
         self.base_name = tk.StringVar(value="recording")
         self.output_dir = tk.StringVar(value="")
         self.show_stream = tk.BooleanVar(value=False)
+        self.nmea_port_cam = tk.StringVar(value="")
+        self.nmea_port_mast = tk.StringVar(value="")
         self.proc: subprocess.Popen | None = None
         self.ffmpeg_path = find_ffmpeg()
         self.preview_stop = threading.Event()
@@ -203,6 +206,14 @@ class App(tk.Tk):
         self.preview_fps = 12
         self.overlay_angle_deg = 10.0
         self.overlay_hfov_deg = 34.0
+        self.angle_mast = 0.0
+        self.angle_cam = 0.0
+        self.nmea_thread_cam: threading.Thread | None = None
+        self.nmea_thread_mast: threading.Thread | None = None
+        self.nmea_stop = threading.Event()
+        self.nmea_sock_cam: socket.socket | None = None
+        self.nmea_sock_mast: socket.socket | None = None
+        self.angle_lock = threading.Lock()
 
         # --- UI ---
         row = 0
@@ -220,6 +231,14 @@ class App(tk.Tk):
         row += 1
         tk.Label(self, text="Clip base name:").grid(row=row, column=0, padx=10, pady=10, sticky="w")
         tk.Entry(self, textvariable=self.base_name, width=20).grid(row=row, column=1, padx=10, pady=10, sticky="w")
+
+        row += 1
+        tk.Label(self, text="NMEA UDP port (camera):").grid(row=row, column=0, padx=10, pady=10, sticky="w")
+        tk.Entry(self, textvariable=self.nmea_port_cam, width=12).grid(row=row, column=1, padx=10, pady=10, sticky="w")
+
+        row += 1
+        tk.Label(self, text="NMEA UDP port (mast):").grid(row=row, column=0, padx=10, pady=10, sticky="w")
+        tk.Entry(self, textvariable=self.nmea_port_mast, width=12).grid(row=row, column=1, padx=10, pady=10, sticky="w")
 
         row += 1
         tk.Checkbutton(
@@ -261,6 +280,8 @@ class App(tk.Tk):
         self.preview_canvas.pack(fill="both", expand=True, padx=8, pady=(0, 6))
         self.preview_status = tk.Label(self.preview_frame, text="", fg="#555", anchor="w")
         self.preview_status.pack(anchor="w", padx=8, pady=(0, 6))
+        self.overlay_status = tk.Label(self.preview_frame, text="", fg="#555", anchor="w")
+        self.overlay_status.pack(anchor="w", padx=8, pady=(0, 10))
 
     # --- Actions ---
     def load_sdp(self):
@@ -408,10 +429,13 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("Error", f"Failed to start ffmpeg: {e}")
             self.proc = None
+            self._stop_nmea_listener()
             return
 
         self.status_lbl.config(text=status_text)
         self.start_btn.config(text="Stop")
+
+        self._start_nmea_listener()
 
         if preview_enabled:
             overlay_ready = np is not None and cv2 is not None
@@ -475,6 +499,123 @@ class App(tk.Tk):
     def _stop_preview(self):
         self.preview_stop.set()
         # No-op otherwise; preview shares the main ffmpeg process when enabled.
+        self.overlay_status.config(text="")
+
+    def _start_nmea_listener(self):
+        cam_port = self._parse_port(self.nmea_port_cam.get().strip())
+        mast_port = self._parse_port(self.nmea_port_mast.get().strip())
+
+        if cam_port is None and mast_port is None:
+            self.overlay_status.config(text="Overlay angle: using static value")
+            return
+
+        self.nmea_stop.clear()
+
+        if cam_port is not None:
+            sock_cam = self._bind_udp(cam_port)
+            if sock_cam:
+                self.nmea_sock_cam = sock_cam
+                self.nmea_thread_cam = threading.Thread(
+                    target=self._nmea_loop, args=(sock_cam, "camangle"), daemon=True
+                )
+                self.nmea_thread_cam.start()
+        if mast_port is not None:
+            sock_mast = self._bind_udp(mast_port)
+            if sock_mast:
+                self.nmea_sock_mast = sock_mast
+                self.nmea_thread_mast = threading.Thread(
+                    target=self._nmea_loop, args=(sock_mast, "mastrot"), daemon=True
+                )
+                self.nmea_thread_mast.start()
+
+        ports = []
+        if cam_port is not None and self.nmea_sock_cam:
+            ports.append(f"cam UDP {cam_port}")
+        if mast_port is not None and self.nmea_sock_mast:
+            ports.append(f"mast UDP {mast_port}")
+        if ports:
+            self.overlay_status.config(text="Listening NMEA on " + ", ".join(ports))
+        else:
+            self.overlay_status.config(text="NMEA listen failed; overlay uses static value")
+
+    def _stop_nmea_listener(self):
+        self.nmea_stop.set()
+        for sock in (self.nmea_sock_cam, self.nmea_sock_mast):
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+        self.nmea_sock_cam = None
+        self.nmea_sock_mast = None
+        self.nmea_thread_cam = None
+        self.nmea_thread_mast = None
+
+    def _bind_udp(self, port: int) -> socket.socket | None:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.bind(("", port))
+            sock.settimeout(1.0)
+            return sock
+        except OSError as exc:
+            self.overlay_status.config(text=f"NMEA listen failed on UDP {port}: {exc}")
+            return None
+
+    def _parse_port(self, port_str: str) -> int | None:
+        if not port_str:
+            return None
+        try:
+            port = int(port_str)
+            if not (1 <= port <= 65535):
+                raise ValueError
+            return port
+        except ValueError:
+            return None
+
+    def _nmea_loop(self, sock: socket.socket, expected_tag: str):
+        while not self.nmea_stop.is_set():
+            try:
+                data, _ = sock.recvfrom(2048)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            try:
+                text = data.decode("ascii", errors="ignore")
+            except Exception:
+                continue
+            for line in text.splitlines():
+                self._handle_nmea_line(line.strip(), expected_tag)
+
+    def _handle_nmea_line(self, line: str, expected_tag: str):
+        # Expect e.g. $INXDR,A,-10.9,D,CamAngle*55 or MastRot
+        if not line.startswith("$INXDR"):
+            return
+        parts = line.split(",")
+        if len(parts) < 5:
+            return
+        try:
+            value = float(parts[2])
+        except ValueError:
+            return
+        tag = parts[4].split("*", 1)[0]
+        if tag.lower() != expected_tag:
+            return
+        with self.angle_lock:
+            if tag.lower() == "camangle":
+                self.angle_cam = value
+            elif tag.lower() == "mastrot":
+                self.angle_mast = value
+            else:
+                return
+            self.overlay_angle_deg = self.angle_cam + self.angle_mast
+            combined = self.overlay_angle_deg
+        self.preview_canvas.after(
+            0,
+            lambda v=value, t=tag, c=combined: self.overlay_status.config(
+                text=f"NMEA {t}: {v:.2f}°, combined overlay: {c:.2f}°"
+            ),
+        )
 
     def _wait_and_reset(self):
         if self.proc is None:
@@ -487,6 +628,7 @@ class App(tk.Tk):
         self.start_btn.config(text="Start")
         self.status_lbl.config(text="Idle")
         self._stop_preview()
+        self._stop_nmea_listener()
 
     def stop_ffmpeg(self):
         if self.proc is None:
@@ -496,6 +638,7 @@ class App(tk.Tk):
         except Exception:
             pass
         self._stop_preview()
+        self._stop_nmea_listener()
         self.status_lbl.config(text="Stopping…")
 
     def on_close(self):
@@ -505,6 +648,7 @@ class App(tk.Tk):
             except Exception:
                 pass
         self._stop_preview()
+        self._stop_nmea_listener()
         self.destroy()
 
 
