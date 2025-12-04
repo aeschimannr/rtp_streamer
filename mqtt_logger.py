@@ -8,6 +8,7 @@ timestamp and previewed inside the UI. Designed to be frozen with PyInstaller.
 
 from __future__ import annotations
 
+import base64
 import json
 import queue
 import threading
@@ -208,12 +209,25 @@ class MqttLoggerApp(tk.Tk):
         if self._log_file is None:
             return
 
-        payload_str = msg.payload.decode("utf-8", errors="replace")
-        topic = msg.topic
+        payload_bytes = msg.payload or b""
         try:
-            payload = json.loads(payload_str)
-        except json.JSONDecodeError:
-            payload = {"_raw": payload_str}
+            payload_str = payload_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            payload_str = None
+
+        topic = msg.topic
+        payload: object
+        if payload_str is not None:
+            try:
+                payload = json.loads(payload_str)
+            except json.JSONDecodeError:
+                payload = {"_raw_text": payload_str}
+        else:
+            payload = {
+                "_raw_base64": base64.b64encode(payload_bytes).decode("ascii"),
+                "_raw_encoding": "base64",
+                "_raw_len": len(payload_bytes),
+            }
 
         if topic == "/proreus/detections":
             if isinstance(payload, dict) and payload.get("type") == "rorqual":
@@ -254,9 +268,12 @@ class MqttLoggerApp(tk.Tk):
             return
 
         self._message_count += 1
-        preview = payload_str.replace("\n", " ")
-        if len(preview) > 120:
-            preview = preview[:117] + "..."
+        if payload_str is None:
+            preview = f"<binary {len(payload_bytes)} bytes>"
+        else:
+            preview = payload_str.replace("\n", " ")
+            if len(preview) > 120:
+                preview = preview[:117] + "..."
         self._queue_event("status", f"Logged {self._message_count} messages")
         self._queue_event("log", f"[MSG {self._message_count}] {msg.topic}: {preview}")
 
