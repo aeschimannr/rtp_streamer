@@ -42,7 +42,7 @@ except Exception:
     cv2 = None  # type: ignore
 
 try:
-    from PIL import Image, ImageTk
+    from PIL import Image, ImageTk, ImageDraw
 
     PIL_AVAILABLE = True
 except Exception:
@@ -202,6 +202,7 @@ class App(tk.Tk):
         self.ffmpeg_path = find_ffmpeg()
         self.preview_stop = threading.Event()
         self.preview_photo = None
+        self.hist_photo = None
         self.preview_size = (640, 480)
         self.preview_fps = 12
         self.overlay_angle_deg = 10.0
@@ -278,6 +279,10 @@ class App(tk.Tk):
             fg="#eee",
         )
         self.preview_canvas.pack(fill="both", expand=True, padx=8, pady=(0, 6))
+        self.hist_label = tk.Label(self.preview_frame, text="Grayscale histogram", anchor="w")
+        self.hist_label.pack(anchor="w", padx=8, pady=(0, 2))
+        self.hist_canvas = tk.Label(self.preview_frame, text="Histogram will appear here", bg="#111", fg="#eee")
+        self.hist_canvas.pack(fill="x", padx=8, pady=(0, 6))
         self.preview_status = tk.Label(self.preview_frame, text="", fg="#555", anchor="w")
         self.preview_status.pack(anchor="w", padx=8, pady=(0, 6))
         self.overlay_status = tk.Label(self.preview_frame, text="", fg="#555", anchor="w")
@@ -441,6 +446,13 @@ class App(tk.Tk):
             overlay_ready = np is not None and cv2 is not None
             overlay_note = "" if overlay_ready else " (overlay disabled: install numpy + opencv-python)"
             self.preview_status.config(text=f"Preview running at ~{self.preview_fps} fps{overlay_note}…")
+            if overlay_ready:
+                self.hist_canvas.config(text="", image="")
+            else:
+                self.hist_canvas.config(
+                    text="Histogram unavailable (requires numpy + opencv-python)",
+                    image="",
+                )
             self.preview_stop.clear()
             threading.Thread(
                 target=self._run_preview,
@@ -456,6 +468,26 @@ class App(tk.Tk):
 
         threading.Thread(target=self._wait_and_reset, daemon=True).start()
 
+    def _make_hist_photo(self, frame_gray):
+        if cv2 is None or np is None or not PIL_AVAILABLE:
+            return None
+        hist = cv2.calcHist([frame_gray], [0], None, [256], [0, 256]).flatten()
+        if hist.size == 0:
+            return None
+        max_val = float(hist.max())
+        if max_val <= 0.0:
+            return None
+
+        # Normalize to [0, 1] so we can scale bars to the canvas height.
+        hist = hist / max_val
+        width, height = 256, 120
+        img = Image.new("RGB", (width, height), "black")
+        draw = ImageDraw.Draw(img)
+        for x, value in enumerate(hist):
+            bar_h = int(value * (height - 1))
+            draw.line([(x, height - 1), (x, height - 1 - bar_h)], fill="#39c", width=1)
+        return ImageTk.PhotoImage(img)
+
     def _run_preview(self, proc: subprocess.Popen, width: int, height: int):
         if proc.stdout is None:
             return
@@ -466,12 +498,14 @@ class App(tk.Tk):
             if not data or len(data) < frame_size:
                 break
             try:
+                hist_photo = None
                 if overlay_ready:
                     arr = np.frombuffer(data, dtype=np.uint8)
                     if arr.size != frame_size:
                         break
                     arr = arr.reshape((height, width, 3))
                     bgr = arr[:, :, ::-1]
+                    frame_gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
                     bgr = draw_angle_line(
                         bgr,
                         self.overlay_angle_deg,
@@ -479,6 +513,7 @@ class App(tk.Tk):
                         color=(0, 0, 255),
                         thickness=2,
                     )
+                    hist_photo = self._make_hist_photo(frame_gray)
                     arr = bgr[:, :, ::-1]
                     img = Image.fromarray(arr, mode="RGB")
                 else:
@@ -487,9 +522,14 @@ class App(tk.Tk):
             except Exception:
                 break
 
-            def update_label(p=photo):
+            def update_label(p=photo, h=hist_photo):
                 self.preview_photo = p
                 self.preview_canvas.config(image=p, text="")
+                if h is not None:
+                    self.hist_photo = h
+                    self.hist_canvas.config(image=h, text="")
+                elif overlay_ready:
+                    self.hist_canvas.config(text="Histogram unavailable", image="")
 
             self.preview_canvas.after(0, update_label)
 
@@ -499,6 +539,8 @@ class App(tk.Tk):
     def _stop_preview(self):
         self.preview_stop.set()
         # No-op otherwise; preview shares the main ffmpeg process when enabled.
+        self.hist_canvas.config(text="Histogram will appear here", image="")
+        self.hist_photo = None
         self.overlay_status.config(text="")
 
     def _start_nmea_listener(self):
