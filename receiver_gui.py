@@ -608,7 +608,7 @@ class App(tk.Tk):
                 self.angle_mast = value
             else:
                 return
-            self.overlay_angle_deg = self.angle_cam + self.angle_mast
+            self.overlay_angle_deg = self.angle_cam - self.angle_mast
             combined = self.overlay_angle_deg
         self.preview_canvas.after(
             0,
